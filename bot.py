@@ -4,17 +4,17 @@ import asyncio
 import google.generativeai as genai
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from dotenv import load_dotenv
 from aiogram.filters import Command
 from aiogram.enums.chat_action import ChatAction
+from dotenv import load_dotenv
 
-# Загружаем переменные окружения
+# Загружаем переменные окружения (из Railway или .env локально)
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Твой Telegram ID
 GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", "models/gemini-2.0-pro-exp-02-05")
 GEMINI_SMART_MODEL = os.getenv("GEMINI_SMART_MODEL", "models/gemini-2.0-flash-thinking-exp-1219")
-ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID"))  # Добавим ваш Telegram ID
 
 # Инициализация Google AI
 genai.configure(api_key=GEMINI_API_KEY)
@@ -38,8 +38,9 @@ start_keyboard = ReplyKeyboardMarkup(
 # Глобальная переменная для хранения текущей модели
 user_model_choice = GEMINI_FAST_MODEL
 
-# Переменная для хранения последних запросов
+# Храним последние 10 запросов
 last_requests = []
+MAX_REQUESTS = 10
 
 # Функция для отправки запроса в Gemini API
 def get_gemini_response(prompt: str, model_name: str) -> str:
@@ -53,11 +54,11 @@ def get_gemini_response(prompt: str, model_name: str) -> str:
             logging.warning(f"Gemini вернул пустой ответ для модели {model_name} и запроса: {prompt}")
             return "Ошибка: AI не вернул текстовый ответ."
     except Exception as e:
-        logging.error(f"Ошибка при запросе к Gemini ({model_name}): {e}, Запрос: {prompt}, Ошибка: {e}")
+        logging.error(f"Ошибка при запросе к Gemini ({model_name}): {e}, Запрос: {prompt}")
         return "Произошла ошибка при обработке запроса. Попробуйте позже."
 
 # Обработчик команды /start
-@dp.message(Command(commands=['start']))
+@dp.message(Command("start"))
 async def send_welcome(message: types.Message):
     await message.answer("Привет! Я бот с AI Gemini. Выберите модель или просто напишите сообщение!", reply_markup=start_keyboard)
 
@@ -76,31 +77,26 @@ async def choose_model(message: types.Message):
 # Обработчик текстовых сообщений
 @dp.message()
 async def handle_message(message: types.Message):
-    print("Функция handle_message вызвана")
+    global last_requests
     user_text = message.text
-    await bot.send_chat_action(message.chat.id, action=ChatAction.TYPING)
-    
-    # Добавляем запрос в список
-    last_requests.append(f"Запрос от {message.from_user.full_name}: {user_text}")
-    
-    # Ограничиваем размер списка, чтобы не хранить слишком много данных
-    if len(last_requests) > 10:
-        last_requests.pop(0)
 
+    # Сохраняем запрос
+    last_requests.append(user_text)
+    if len(last_requests) > MAX_REQUESTS:
+        last_requests.pop(0)  # Удаляем самый старый запрос
+
+    await bot.send_chat_action(message.chat.id, action=ChatAction.TYPING)
     ai_response = get_gemini_response(user_text, user_model_choice)
     await message.answer(ai_response)
 
-# Обработчик команды для просмотра последних запросов
-@dp.message(Command(commands=['last_requests']))
-async def show_last_requests(message: types.Message):
-    if message.from_user.id == ADMIN_USER_ID:
-        if last_requests:
-            response = "\n".join(last_requests)
-        else:
-            response = "Нет последних запросов."
-        await message.answer(f"Последние запросы:\n{response}")
+# Обработчик команды /history (доступна только админу)
+@dp.message(Command("history"))
+async def send_history(message: types.Message):
+    if message.from_user.id == ADMIN_ID:
+        history_text = "\n".join(last_requests) or "История пуста."
+        await message.answer(f"Последние запросы:\n{history_text}")
     else:
-        await message.answer("У вас нет прав для просмотра последних запросов.")
+        await message.answer("У тебя нет доступа к этой команде.")
 
 # Запуск бота
 async def main():
