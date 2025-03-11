@@ -1,15 +1,18 @@
 import os
 import logging
 import asyncio
+from typing import Dict, Any, Optional
 import google.generativeai as genai
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from dotenv import load_dotenv
 from aiogram.filters import Command
-from aiogram.enums.chat_action import ChatAction # Исправленный импорт ChatAction
+from aiogram.enums.chat_action import ChatAction
+from dotenv import load_dotenv
 
 # Загружаем переменные окружения
 load_dotenv()
+
+# Конфигурация
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_FAST_MODEL = os.getenv("GEMINI_FAST_MODEL", "models/gemini-2.0-pro-exp-02-05")
@@ -20,12 +23,16 @@ genai.configure(api_key=GEMINI_API_KEY)
 
 # Настройка логирования
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Создаём бота и диспетчер
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
 dp = Dispatcher()
 
-# Клавиатура команд
+# Хранилище для текущей модели пользователя
+user_models: Dict[int, str] = {}
+
+# Клавиатура с командами
 start_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🔄 Задать вопрос AI")],
@@ -34,52 +41,87 @@ start_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# Глобальная переменная для хранения текущей модели
-user_model_choice = GEMINI_FAST_MODEL
-
 # Функция для отправки запроса в Gemini API
-def get_gemini_response(prompt: str, model_name: str) -> str:
+async def get_gemini_response(prompt: str, model_name: str) -> str:
+    """Асинхронная функция для получения ответа от Gemini API"""
     try:
-        print(f"Запрос к Gemini API. Модель: {model_name}, Запрос: {prompt}")
-        model = genai.GenerativeModel(model_name)
-        response = model.generate_content(prompt)
+        logger.info(f"Запрос к Gemini API. Модель: {model_name}, Запрос: {prompt}")
+        
+        # Используем asyncio для выполнения синхронного вызова в отдельном потоке
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: genai.GenerativeModel(model_name).generate_content(prompt)
+        )
+        
         if response.text:
             return response.text
         else:
-            logging.warning(f"Gemini вернул пустой ответ для модели {model_name} и запроса: {prompt}")
+            logger.warning(f"Gemini вернул пустой ответ для модели {model_name} и запроса: {prompt}")
             return "Ошибка: AI не вернул текстовый ответ."
     except Exception as e:
-        logging.error(f"Ошибка при запросе к Gemini ({model_name}): {e}, Запрос: {prompt}, Ошибка: {e}")
-        return "Произошла ошибка при обработке запроса. Попробуйте позже."
+        logger.error(f"Ошибка при запросе к Gemini ({model_name}): {e}, Запрос: {prompt}")
+        return f"Произошла ошибка при обработке запроса: {str(e)}"
 
 # Обработчик команды /start
 @dp.message(Command(commands=['start']))
 async def send_welcome(message: types.Message):
-    await message.answer("Привет! Я бот с AI Gemini. Выберите модель или просто напишите сообщение!", reply_markup=start_keyboard)
+    """Обработчик команды /start"""
+    user_id = message.from_user.id
+    user_models[user_id] = GEMINI_FAST_MODEL  # Устанавливаем модель по умолчанию
+    
+    await message.answer(
+        "Привет! Я бот с AI Gemini. Выберите модель или просто напишите сообщение!",
+        reply_markup=start_keyboard
+    )
+
+# Обработчик команды /help
+@dp.message(Command(commands=['help']))
+async def send_help(message: types.Message):
+    """Обработчик команды /help"""
+    help_text = """
+    Доступные команды:
+    /start - Начать чат
+    /help - Показать справку
+    """
+    await message.answer(help_text)
 
 # Обработчик выбора модели
 @dp.message(lambda message: message.text in ["⚡ Быстрая модель", "🧠 Умная модель"])
 async def choose_model(message: types.Message):
-    global user_model_choice
+    """Обработчик выбора модели пользователем"""
+    user_id = message.from_user.id
     if message.text == "⚡ Быстрая модель":
-        user_model_choice = GEMINI_FAST_MODEL
-        await message.answer("Вы выбрали ⚡ Быструю модель (немного тупее, но отвечает быстрее).")
+        user_models[user_id] = GEMINI_FAST_MODEL
+        await message.answer("⚡ Быстрая модель активирована (немного тупее, но отвечает быстрее).")
     else:
-        user_model_choice = GEMINI_SMART_MODEL
-        await message.answer("Вы выбрали 🧠 Умную модель (отвечает медленнее, но умнее).")
-    print(f"Выбрана модель: {user_model_choice}")
+        user_models[user_id] = GEMINI_SMART_MODEL
+        await message.answer("🧠 Умная модель активирована (отвечает медленнее, но умнее).")
+    logger.info(f"Пользователь {user_id} выбрал модель: {user_models[user_id]}")
 
 # Обработчик текстовых сообщений
 @dp.message()
 async def handle_message(message: types.Message):
-    print("Функция handle_message вызвана")
+    """Основной обработчик текстовых сообщений"""
+    user_id = message.from_user.id
     user_text = message.text
-    await bot.send_chat_action(message.chat.id, action=ChatAction.TYPING) # Исправлено использование ChatAction
-    ai_response = get_gemini_response(user_text, user_model_choice)
+    
+    # Устанавливаем модель по умолчанию, если пользователь не выбрал
+    if user_id not in user_models:
+        user_models[user_id] = GEMINI_FAST_MODEL
+    
+    # Показываем индикатор печати
+    await bot.send_chat_action(message.chat.id, action=ChatAction.TYPING)
+    
+    # Получаем ответ от AI
+    ai_response = await get_gemini_response(user_text, user_models[user_id])
+    
+    # Отправляем ответ пользователю
     await message.answer(ai_response)
 
 # Запуск бота
 async def main():
+    """Основная функция для запуска бота"""
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
